@@ -7,7 +7,6 @@ package arkade
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"fmt"
 	"testing"
 
@@ -1405,15 +1404,6 @@ func TestNewOpcodes(t *testing.T) {
 	}
 }
 
-// testTaggedHash computes a BIP-341 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || msg)
-func testTaggedHash(tag, msg []byte) []byte {
-	tagHash := sha256.Sum256(tag)
-	h := sha256.New()
-	h.Write(tagHash[:])
-	h.Write(tagHash[:])
-	h.Write(msg)
-	return h.Sum(nil)
-}
 
 func TestMerklePathVerify(t *testing.T) {
 	t.Parallel()
@@ -1450,8 +1440,8 @@ func TestMerklePathVerify(t *testing.T) {
 	branchTag := []byte("TapBranch")
 
 	// Pre-compute hashes for a 2-leaf tree: leaf="hello", sibling="world"
-	siblingHash := testTaggedHash(leafTag, []byte("world"))
-	leafHash := testTaggedHash(leafTag, []byte("hello"))
+	siblingHash := chainhash.TaggedHash(leafTag, []byte("world"))[:]
+	leafHash := chainhash.TaggedHash(leafTag, []byte("hello"))[:]
 
 	// Compute root for 2-leaf tree (sorted concatenation)
 	var root2Leaf []byte
@@ -1463,13 +1453,13 @@ func TestMerklePathVerify(t *testing.T) {
 		copy(combined2[:32], siblingHash)
 		copy(combined2[32:], leafHash)
 	}
-	root2Leaf = testTaggedHash(branchTag, combined2)
+	root2Leaf = chainhash.TaggedHash(branchTag, combined2)[:]
 
 	// Pre-compute hashes for a 4-leaf tree: A="alpha", B="beta", C="gamma", D="delta"
-	hashA := testTaggedHash(leafTag, []byte("alpha"))
-	hashB := testTaggedHash(leafTag, []byte("beta"))
-	hashC := testTaggedHash(leafTag, []byte("gamma"))
-	hashD := testTaggedHash(leafTag, []byte("delta"))
+	hashA := chainhash.TaggedHash(leafTag, []byte("alpha"))[:]
+	hashB := chainhash.TaggedHash(leafTag, []byte("beta"))[:]
+	hashC := chainhash.TaggedHash(leafTag, []byte("gamma"))[:]
+	hashD := chainhash.TaggedHash(leafTag, []byte("delta"))[:]
 
 	// Left subtree: AB (sorted)
 	combinedAB := make([]byte, 64)
@@ -1480,7 +1470,7 @@ func TestMerklePathVerify(t *testing.T) {
 		copy(combinedAB[:32], hashB)
 		copy(combinedAB[32:], hashA)
 	}
-	hashAB := testTaggedHash(branchTag, combinedAB)
+	hashAB := chainhash.TaggedHash(branchTag, combinedAB)[:]
 
 	// Right subtree: CD (sorted)
 	combinedCD := make([]byte, 64)
@@ -1491,7 +1481,7 @@ func TestMerklePathVerify(t *testing.T) {
 		copy(combinedCD[:32], hashD)
 		copy(combinedCD[32:], hashC)
 	}
-	hashCD := testTaggedHash(branchTag, combinedCD)
+	hashCD := chainhash.TaggedHash(branchTag, combinedCD)[:]
 
 	// Root: ABCD (sorted)
 	combinedABCD := make([]byte, 64)
@@ -1502,7 +1492,7 @@ func TestMerklePathVerify(t *testing.T) {
 		copy(combinedABCD[:32], hashCD)
 		copy(combinedABCD[32:], hashAB)
 	}
-	rootABCD := testTaggedHash(branchTag, combinedABCD)
+	rootABCD := chainhash.TaggedHash(branchTag, combinedABCD)[:]
 
 	// Proof for leaf A ("alpha"): [hashB, hashCD] (64 bytes)
 	proofA := make([]byte, 64)
@@ -1510,7 +1500,7 @@ func TestMerklePathVerify(t *testing.T) {
 	copy(proofA[32:], hashCD)
 
 	// Single leaf root (empty proof): leaf_hash("hello") is the root
-	singleLeafRoot := testTaggedHash(leafTag, []byte("hello"))
+	singleLeafRoot := chainhash.TaggedHash(leafTag, []byte("hello"))[:]
 
 	type merkleTestCase struct {
 		name  string

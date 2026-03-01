@@ -294,6 +294,7 @@ The following opcodes are supported by the Arkade script engine. They extend Bit
 | Word | Opcode | Hex | Input | Output | Description |
 |------|--------|-----|-------|--------|-------------|
 | OP_CHECKSIGFROMSTACK | 204 | 0xcc | sig pubkey message | True/false | Verifies a Schnorr signature. Pops signature (64 bytes), public key (32 bytes), and message from the stack. Returns 1 if valid, 0 otherwise. If signature is empty, pushes empty vector. |
+| OP_MERKLEPATHVERIFY | 244 | 0xf4 | leaf_tag branch_tag proof leaf_data expected_root | Nothing/fail | Verifies a Merkle path using BIP-341 tagged hashes. Computes leaf hash as `tagged_hash(leaf_tag, leaf_data)`, walks the proof path (each 32-byte sibling sorted-concatenated via `tagged_hash(branch_tag, ...)`), and fails if the result doesn't match `expected_root`. |
 
 ### 64-bit Arithmetic Operations
 

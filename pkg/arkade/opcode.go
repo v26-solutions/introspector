@@ -3173,7 +3173,8 @@ func opcodeMerklePathVerify(op *opcode, data []byte, vm *Engine) error {
 	}
 
 	// Compute leaf hash: tagged_hash(leaf_tag, leaf_data)
-	current := taggedHash(leafTag, leafData)
+	currentHash := chainhash.TaggedHash(leafTag, leafData)
+	current := currentHash[:]
 
 	// Walk the proof path
 	for i := 0; i < len(proof); i += 32 {
@@ -3188,7 +3189,8 @@ func opcodeMerklePathVerify(op *opcode, data []byte, vm *Engine) error {
 			copy(combined[:32], sibling)
 			copy(combined[32:], current)
 		}
-		current = taggedHash(branchTag, combined)
+		branchHash := chainhash.TaggedHash(branchTag, combined)
+		current = branchHash[:]
 	}
 
 	// Verify
@@ -3200,12 +3202,3 @@ func opcodeMerklePathVerify(op *opcode, data []byte, vm *Engine) error {
 	return nil
 }
 
-// taggedHash computes a BIP-341 tagged hash: SHA256(SHA256(tag) || SHA256(tag) || msg)
-func taggedHash(tag, msg []byte) []byte {
-	tagHash := sha256.Sum256(tag)
-	h := sha256.New()
-	h.Write(tagHash[:])
-	h.Write(tagHash[:])
-	h.Write(msg)
-	return h.Sum(nil)
-}
