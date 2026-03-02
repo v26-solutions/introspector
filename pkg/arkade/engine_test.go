@@ -8,6 +8,7 @@ package arkade
 import (
 	"bytes"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -1405,7 +1406,7 @@ func TestNewOpcodes(t *testing.T) {
 }
 
 
-func TestMerklePathVerify(t *testing.T) {
+func TestMerkleBranchVerify(t *testing.T) {
 	t.Parallel()
 
 	prevoutFetcher := txscript.NewMultiPrevOutFetcher(map[wire.OutPoint]*wire.TxOut{
@@ -1436,203 +1437,394 @@ func TestMerklePathVerify(t *testing.T) {
 		},
 	}
 
-	leafTag := []byte("TapLeaf")
-	branchTag := []byte("TapBranch")
-
-	// Pre-compute hashes for a 2-leaf tree: leaf="hello", sibling="world"
-	siblingHash := chainhash.TaggedHash(leafTag, []byte("world"))[:]
-	leafHash := chainhash.TaggedHash(leafTag, []byte("hello"))[:]
-
-	// Compute root for 2-leaf tree (sorted concatenation)
-	var root2Leaf []byte
-	combined2 := make([]byte, 64)
-	if bytes.Compare(leafHash, siblingHash) < 0 {
-		copy(combined2[:32], leafHash)
-		copy(combined2[32:], siblingHash)
-	} else {
-		copy(combined2[:32], siblingHash)
-		copy(combined2[32:], leafHash)
-	}
-	root2Leaf = chainhash.TaggedHash(branchTag, combined2)[:]
-
-	// Pre-compute hashes for a 4-leaf tree: A="alpha", B="beta", C="gamma", D="delta"
-	hashA := chainhash.TaggedHash(leafTag, []byte("alpha"))[:]
-	hashB := chainhash.TaggedHash(leafTag, []byte("beta"))[:]
-	hashC := chainhash.TaggedHash(leafTag, []byte("gamma"))[:]
-	hashD := chainhash.TaggedHash(leafTag, []byte("delta"))[:]
-
-	// Left subtree: AB (sorted)
-	combinedAB := make([]byte, 64)
-	if bytes.Compare(hashA, hashB) < 0 {
-		copy(combinedAB[:32], hashA)
-		copy(combinedAB[32:], hashB)
-	} else {
-		copy(combinedAB[:32], hashB)
-		copy(combinedAB[32:], hashA)
-	}
-	hashAB := chainhash.TaggedHash(branchTag, combinedAB)[:]
-
-	// Right subtree: CD (sorted)
-	combinedCD := make([]byte, 64)
-	if bytes.Compare(hashC, hashD) < 0 {
-		copy(combinedCD[:32], hashC)
-		copy(combinedCD[32:], hashD)
-	} else {
-		copy(combinedCD[:32], hashD)
-		copy(combinedCD[32:], hashC)
-	}
-	hashCD := chainhash.TaggedHash(branchTag, combinedCD)[:]
-
-	// Root: ABCD (sorted)
-	combinedABCD := make([]byte, 64)
-	if bytes.Compare(hashAB, hashCD) < 0 {
-		copy(combinedABCD[:32], hashAB)
-		copy(combinedABCD[32:], hashCD)
-	} else {
-		copy(combinedABCD[:32], hashCD)
-		copy(combinedABCD[32:], hashAB)
-	}
-	rootABCD := chainhash.TaggedHash(branchTag, combinedABCD)[:]
-
-	// Proof for leaf A ("alpha"): [hashB, hashCD] (64 bytes)
-	proofA := make([]byte, 64)
-	copy(proofA[:32], hashB)
-	copy(proofA[32:], hashCD)
-
-	// Single leaf root (empty proof): leaf_hash("hello") is the root
-	singleLeafRoot := chainhash.TaggedHash(leafTag, []byte("hello"))[:]
-
-	type merkleTestCase struct {
-		name  string
-		valid bool
-		stack [][]byte // pushed onto stack before script runs
+	// --- Helper: sort-and-combine for branch hash ---
+	sortedBranchHash := func(branchTag, left, right []byte) []byte {
+		combined := make([]byte, 64)
+		if bytes.Compare(left, right) < 0 {
+			copy(combined[:32], left)
+			copy(combined[32:], right)
+		} else {
+			copy(combined[:32], right)
+			copy(combined[32:], left)
+		}
+		h := chainhash.TaggedHash(branchTag, combined)
+		return h[:]
 	}
 
-	// The script is: OP_MERKLEPATHVERIFY OP_TRUE
-	// Stack before script: [leaf_tag, branch_tag, proof, leaf_data, expected_root]
-	// OP_MERKLEPATHVERIFY pops all 5 items; OP_TRUE pushes 1 for clean stack.
-	tests := []merkleTestCase{
+	leafTag := []byte("ArkadeLeaf")
+	branchTag := []byte("ArkadeBranch")
+
+	// ---- 2-leaf tree: "hello", "world" ----
+	leafA2 := chainhash.TaggedHash(leafTag, []byte("hello"))
+	leafB2 := chainhash.TaggedHash(leafTag, []byte("world"))
+	root2Leaf := sortedBranchHash(branchTag, leafA2[:], leafB2[:])
+
+	// ---- 4-leaf tree: "alpha", "beta", "gamma", "delta" ----
+	hashA := chainhash.TaggedHash(leafTag, []byte("alpha"))
+	hashB := chainhash.TaggedHash(leafTag, []byte("beta"))
+	hashC := chainhash.TaggedHash(leafTag, []byte("gamma"))
+	hashD := chainhash.TaggedHash(leafTag, []byte("delta"))
+
+	hashAB := sortedBranchHash(branchTag, hashA[:], hashB[:])
+	hashCD := sortedBranchHash(branchTag, hashC[:], hashD[:])
+	rootABCD := sortedBranchHash(branchTag, hashAB, hashCD)
+
+	// Proof for leaf "alpha": [hashB, hashCD]
+	proofAlpha := make([]byte, 64)
+	copy(proofAlpha[:32], hashB[:])
+	copy(proofAlpha[32:], hashCD)
+
+	// Proof for leaf "beta": [hashA, hashCD]
+	proofBeta := make([]byte, 64)
+	copy(proofBeta[:32], hashA[:])
+	copy(proofBeta[32:], hashCD)
+
+	// ---- Single leaf: "only" ----
+	singleLeafRoot := chainhash.TaggedHash(leafTag, []byte("only"))
+
+	// ---- Raw hash mode vectors ----
+	// Use leafA2 as a pre-computed 32-byte hash, treat it as raw leaf_data
+	rawLeafData := leafA2[:]                                              // 32 bytes
+	rawSibling := leafB2[:]                                               // 32 bytes
+	rawRoot := sortedBranchHash(branchTag, rawLeafData[:], rawSibling[:]) // root in raw mode
+
+	// ---- Proof chaining vectors ----
+	// Build a 4-leaf tree but prove via chaining:
+	// First call: prove "alpha" in left subtree -> produces hashAB (sub-root)
+	// Second call: use hashAB as raw leaf_data with proof=[hashCD] -> produces rootABCD
+	chainSubProof := make([]byte, 32)
+	copy(chainSubProof, hashB[:]) // proof for alpha in left subtree
+
+	chainUpperProof := make([]byte, 32)
+	copy(chainUpperProof, hashCD) // proof for sub-root in full tree
+
+	// --- Helper to build engine and run ---
+	runTest := func(tt *testing.T, script []byte, stack [][]byte) error {
+		tt.Helper()
+		engine, err := NewEngine(
+			script,
+			simpleTx, 0,
+			txscript.NewSigCache(100),
+			txscript.NewTxSigHashes(simpleTx, prevoutFetcher),
+			0,
+			prevoutFetcher,
+		)
+		if err != nil {
+			tt.Fatalf("NewEngine failed: %v", err)
+		}
+		engine.SetStack(stack)
+		return engine.Execute()
+	}
+
+	type testCase struct {
+		name    string
+		valid   bool
+		script  func(t *testing.T) []byte
+		stack   [][]byte
+		errText string // substring expected in error (for invalid cases)
+	}
+
+	tests := []testCase{
+		// ---- Test 1: valid 2-leaf tree ----
 		{
 			name:  "valid_2leaf_tree",
 			valid: true,
+			script: func(t *testing.T) []byte {
+				// OP_MERKLEBRANCHVERIFY <expected_root> OP_EQUALVERIFY OP_TRUE
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(root2Leaf).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
+			},
 			stack: [][]byte{
 				leafTag,         // leaf_tag (bottom)
 				branchTag,       // branch_tag
-				siblingHash,     // proof (32 bytes = 1 sibling)
-				[]byte("hello"), // leaf_data
-				root2Leaf,       // expected_root (top)
+				leafB2[:],       // proof = sibling hash
+				[]byte("hello"), // leaf_data (top)
 			},
 		},
+		// ---- Test 2: valid 4-leaf tree ----
 		{
 			name:  "valid_4leaf_tree",
 			valid: true,
+			script: func(t *testing.T) []byte {
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(rootABCD).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
+			},
 			stack: [][]byte{
 				leafTag,         // leaf_tag (bottom)
 				branchTag,       // branch_tag
-				proofA,          // proof (64 bytes = 2 siblings)
-				[]byte("alpha"), // leaf_data
-				rootABCD,        // expected_root (top)
+				proofAlpha,      // proof = [hashB, hashCD] (64 bytes)
+				[]byte("alpha"), // leaf_data (top)
 			},
 		},
+		// ---- Test 3: valid single leaf, empty proof ----
 		{
-			name:  "valid_empty_proof_single_leaf",
+			name:  "valid_single_leaf_empty_proof",
 			valid: true,
+			script: func(t *testing.T) []byte {
+				// Root = tagged_hash(leafTag, "only") since proof is empty
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(singleLeafRoot[:]).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
+			},
 			stack: [][]byte{
-				leafTag,         // leaf_tag (bottom)
-				branchTag,       // branch_tag
-				{},              // proof (empty = 0 siblings, leaf hash is root)
-				[]byte("hello"), // leaf_data
-				singleLeafRoot,  // expected_root = tagged_hash(leaf_tag, "hello")
+				leafTag,        // leaf_tag (bottom)
+				branchTag,      // branch_tag
+				{},             // empty proof
+				[]byte("only"), // leaf_data (top)
 			},
 		},
+		// ---- Test 4: valid raw hash mode (empty leaf_tag) ----
 		{
-			name:  "invalid_wrong_expected_root",
+			name:  "valid_raw_hash_mode",
+			valid: true,
+			script: func(t *testing.T) []byte {
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(rawRoot).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
+			},
+			stack: [][]byte{
+				{},           // empty leaf_tag -> raw hash mode
+				branchTag,    // branch_tag
+				rawSibling,   // proof = sibling
+				rawLeafData,  // leaf_data = 32 bytes (pre-computed hash)
+			},
+		},
+		// ---- Test 5: valid proof chaining ----
+		// First OP_MERKLEBRANCHVERIFY: prove "alpha" in left subtree -> pushes hashAB
+		// Then set up raw mode args and call again -> pushes rootABCD
+		{
+			name:  "valid_proof_chaining",
+			valid: true,
+			script: func(t *testing.T) []byte {
+				// Stack before: [leafTag, branchTag, chainSubProof, "alpha"]
+				// After 1st MERKLEBRANCHVERIFY: [..., hashAB]
+				// Then we push: OP_0 (empty leaf_tag for raw mode), branchTag, chainUpperProof
+				// Then: 3 OP_ROLL to bring hashAB to top as leaf_data
+				// After 2nd MERKLEBRANCHVERIFY: [..., rootABCD]
+				// Then: <rootABCD> OP_EQUALVERIFY OP_TRUE
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddOp(OP_0).
+					AddData(branchTag).
+					AddData(chainUpperProof).
+					AddOp(OP_3).
+					AddOp(OP_ROLL).
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(rootABCD).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
+			},
+			stack: [][]byte{
+				leafTag,         // leaf_tag for first call
+				branchTag,       // branch_tag for first call
+				chainSubProof,   // proof for alpha in left subtree
+				[]byte("alpha"), // leaf_data
+			},
+		},
+		// ---- Test 6: valid two leaves same tree, verify roots match ----
+		// Prove "alpha" and "beta" in same 4-leaf tree, check roots equal
+		{
+			name:  "valid_two_leaf_same_tree",
+			valid: true,
+			script: func(t *testing.T) []byte {
+				// Stack before: [leafTag, branchTag, proofAlpha, "alpha"]
+				// 1st MERKLEBRANCHVERIFY -> pushes rootABCD (from alpha)
+				// Then push items for beta proof inline:
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(leafTag).
+					AddData(branchTag).
+					AddData(proofBeta).
+					AddData([]byte("beta")).
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
+			},
+			stack: [][]byte{
+				leafTag,         // leaf_tag for first call (bottom)
+				branchTag,       // branch_tag for first call
+				proofAlpha,      // proof for alpha
+				[]byte("alpha"), // leaf_data for first call (top)
+			},
+		},
+		// ---- Test 7: invalid wrong root ----
+		{
+			name:  "invalid_wrong_root",
 			valid: false,
+			script: func(t *testing.T) []byte {
+				wrongRoot := make([]byte, 32) // all zeros
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(wrongRoot).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
+			},
 			stack: [][]byte{
 				leafTag,
 				branchTag,
-				siblingHash,
+				leafB2[:],
 				[]byte("hello"),
-				make([]byte, 32), // wrong root (all zeros)
 			},
+			errText: "EQUALVERIFY",
 		},
+		// ---- Test 8: invalid proof not multiple of 32 ----
 		{
-			name:  "invalid_proof_length_not_multiple_of_32",
+			name:  "invalid_proof_not_multiple_of_32",
 			valid: false,
+			script: func(t *testing.T) []byte {
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(root2Leaf).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
+			},
 			stack: [][]byte{
 				leafTag,
 				branchTag,
 				make([]byte, 33), // 33 bytes, not multiple of 32
 				[]byte("hello"),
-				root2Leaf,
 			},
+			errText: "proof length",
 		},
-		{
-			name:  "invalid_empty_leaf_tag",
-			valid: false,
-			stack: [][]byte{
-				{}, // empty leaf_tag
-				branchTag,
-				siblingHash,
-				[]byte("hello"),
-				root2Leaf,
-			},
-		},
+		// ---- Test 9: invalid empty branch_tag ----
 		{
 			name:  "invalid_empty_branch_tag",
 			valid: false,
+			script: func(t *testing.T) []byte {
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(root2Leaf).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
+			},
 			stack: [][]byte{
 				leafTag,
-				{}, // empty branch_tag
-				siblingHash,
+				{},          // empty branch_tag
+				leafB2[:],
 				[]byte("hello"),
-				root2Leaf,
 			},
+			errText: "branch_tag",
 		},
+		// ---- Test 10: invalid raw mode leaf not 32 bytes (10 bytes) ----
 		{
-			name:  "invalid_expected_root_not_32_bytes",
+			name:  "invalid_raw_mode_leaf_not_32_bytes",
 			valid: false,
-			stack: [][]byte{
-				leafTag,
-				branchTag,
-				siblingHash,
-				[]byte("hello"),
-				[]byte{0x01, 0x02, 0x03}, // only 3 bytes
+			script: func(t *testing.T) []byte {
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(rawRoot).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
 			},
+			stack: [][]byte{
+				{},                    // empty leaf_tag -> raw hash mode
+				branchTag,
+				rawSibling,
+				make([]byte, 10),      // only 10 bytes, must be 32 in raw mode
+			},
+			errText: "leaf_data",
+		},
+		// ---- Test 11: invalid raw mode leaf 31 bytes ----
+		{
+			name:  "invalid_empty_leaf_tag_nonempty_but_wrong_size",
+			valid: false,
+			script: func(t *testing.T) []byte {
+				s, err := txscript.NewScriptBuilder().
+					AddOp(OP_MERKLEBRANCHVERIFY).
+					AddData(rawRoot).
+					AddOp(OP_EQUALVERIFY).
+					AddOp(OP_TRUE).
+					Script()
+				if err != nil {
+					t.Fatalf("script build: %v", err)
+				}
+				return s
+			},
+			stack: [][]byte{
+				{},                    // empty leaf_tag -> raw hash mode
+				branchTag,
+				rawSibling,
+				make([]byte, 31),      // 31 bytes, must be 32 in raw mode
+			},
+			errText: "leaf_data",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(tt *testing.T) {
-			builder := txscript.NewScriptBuilder().
-				AddOp(OP_MERKLEPATHVERIFY).
-				AddOp(OP_TRUE)
+			script := tc.script(tt)
 
-			script, err := builder.Script()
-			if err != nil {
-				tt.Fatalf("Script build failed: %v", err)
-			}
-
-			engine, err := NewEngine(
-				script,
-				simpleTx, 0,
-				txscript.NewSigCache(100),
-				txscript.NewTxSigHashes(simpleTx, prevoutFetcher),
-				0,
-				prevoutFetcher,
-			)
-			if err != nil {
-				tt.Fatalf("NewEngine failed: %v", err)
-			}
-
-			engine.SetStack(tc.stack)
-
-			err = engine.Execute()
+			err := runTest(tt, script, tc.stack)
 			if tc.valid && err != nil {
 				tt.Errorf("Execute failed: %v", err)
 			}
 			if !tc.valid && err == nil {
 				tt.Errorf("Execute should have failed")
+			}
+			if !tc.valid && err != nil && tc.errText != "" {
+				if !strings.Contains(err.Error(), tc.errText) {
+					tt.Errorf("Expected error containing %q, got: %v", tc.errText, err)
+				}
 			}
 		})
 	}

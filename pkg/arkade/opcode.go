@@ -222,7 +222,7 @@ const (
 	OP_CHECKLOCKTIMEVERIFY = 0xb1 // 177 - AKA OP_NOP2
 	OP_NOP3                = 0xb2 // 178
 	OP_CHECKSEQUENCEVERIFY = 0xb2 // 178 - AKA OP_NOP3
-	OP_NOP4                = 0xb3 // 179
+	OP_MERKLEBRANCHVERIFY  = 0xb3 // 179
 	OP_NOP5                = 0xb4 // 180
 	OP_NOP6                = 0xb5 // 181
 	OP_NOP7                = 0xb6 // 182
@@ -302,7 +302,7 @@ const (
 	OP_INSPECTINASSETAT            = 0xf1 // 241
 	OP_INSPECTINASSETLOOKUP        = 0xf2 // 242
 	OP_UNKNOWN243           = 0xf3 // 243
-	OP_MERKLEPATHVERIFY     = 0xf4 // 244
+	OP_UNKNOWN244           = 0xf4 // 244
 	OP_UNKNOWN245           = 0xf5 // 245
 	OP_UNKNOWN246           = 0xf6 // 246
 	OP_UNKNOWN247           = 0xf7 // 247
@@ -522,7 +522,7 @@ var opcodeArray = [256]opcode{
 
 	// Reserved opcodes.
 	OP_NOP1:  {OP_NOP1, "OP_NOP1", 1, opcodeNop},
-	OP_NOP4:  {OP_NOP4, "OP_NOP4", 1, opcodeNop},
+	OP_MERKLEBRANCHVERIFY:  {OP_MERKLEBRANCHVERIFY, "OP_MERKLEBRANCHVERIFY", 1, opcodeMerkleBranchVerify},
 	OP_NOP5:  {OP_NOP5, "OP_NOP5", 1, opcodeNop},
 	OP_NOP6:  {OP_NOP6, "OP_NOP6", 1, opcodeNop},
 	OP_NOP7:  {OP_NOP7, "OP_NOP7", 1, opcodeNop},
@@ -603,7 +603,7 @@ var opcodeArray = [256]opcode{
 	OP_INSPECTINASSETAT:            {OP_INSPECTINASSETAT, "OP_INSPECTINASSETAT", 1, opcodeInspectInAssetAt},
 	OP_INSPECTINASSETLOOKUP:        {OP_INSPECTINASSETLOOKUP, "OP_INSPECTINASSETLOOKUP", 1, opcodeInspectInAssetLookup},
 	OP_UNKNOWN243:           {OP_UNKNOWN243, "OP_UNKNOWN243", 1, opcodeInvalid},
-	OP_MERKLEPATHVERIFY:     {OP_MERKLEPATHVERIFY, "OP_MERKLEPATHVERIFY", 1, opcodeMerklePathVerify},
+	OP_UNKNOWN244:           {OP_UNKNOWN244, "OP_UNKNOWN244", 1, opcodeInvalid},
 	OP_UNKNOWN245:           {OP_UNKNOWN245, "OP_UNKNOWN245", 1, opcodeInvalid},
 	OP_UNKNOWN246:           {OP_UNKNOWN246, "OP_UNKNOWN246", 1, opcodeInvalid},
 	OP_UNKNOWN247:           {OP_UNKNOWN247, "OP_UNKNOWN247", 1, opcodeInvalid},
@@ -747,7 +747,7 @@ func opcodeN(op *opcode, data []byte, vm *Engine) error {
 // the flag to discourage use of NOPs is set for select opcodes.
 func opcodeNop(op *opcode, data []byte, vm *Engine) error {
 	switch op.value {
-	case OP_NOP1, OP_NOP4, OP_NOP5,
+	case OP_NOP1, OP_NOP5,
 		OP_NOP6, OP_NOP7, OP_NOP8, OP_NOP9, OP_NOP10:
 
 		str := fmt.Sprintf("%v reserved for soft-fork "+
@@ -3119,23 +3119,19 @@ func opcodeSha256Finalize(op *opcode, _ []byte, vm *Engine) error {
 	return nil
 }
 
-// opcodeMerklePathVerify performs a generalized Merkle path verification
-// using BIP-341 tagged hashes.
+// opcodeMerkleBranchVerify computes a Merkle root from a leaf and proof
+// path using BIP-341 tagged hashes with lexicographic sibling ordering.
 //
-// Stack inputs (top to bottom): expected_root, leaf_data, proof, branch_tag, leaf_tag
-// Stack transformation: [... leaf_tag branch_tag proof leaf_data expected_root] -> [...]
-// Fails if the computed root doesn't match expected_root.
-func opcodeMerklePathVerify(op *opcode, data []byte, vm *Engine) error {
-	// Pop expected_root (must be 32 bytes)
-	expectedRoot, err := vm.dstack.PopByteArray()
-	if err != nil {
-		return err
-	}
-	if len(expectedRoot) != 32 {
-		return scriptError(txscript.ErrInvalidStackOperation,
-			"expected_root must be 32 bytes")
-	}
-
+// Stack inputs (top to bottom): leaf_data, proof, branch_tag, leaf_tag
+// Stack output: computed_root (32 bytes)
+//
+// If leaf_tag is empty, leaf_data must be exactly 32 bytes and is used
+// as a raw hash (enables proof chaining). If leaf_tag is non-empty,
+// the leaf hash is computed as tagged_hash(leaf_tag, leaf_data).
+//
+// At each proof step, siblings are sorted lexicographically before
+// hashing: tagged_hash(branch_tag, min || max).
+func opcodeMerkleBranchVerify(op *opcode, data []byte, vm *Engine) error {
 	// Pop leaf_data
 	leafData, err := vm.dstack.PopByteArray()
 	if err != nil {
@@ -3162,43 +3158,43 @@ func opcodeMerklePathVerify(op *opcode, data []byte, vm *Engine) error {
 			"branch_tag must not be empty")
 	}
 
-	// Pop leaf_tag (must not be empty)
+	// Pop leaf_tag (empty = raw hash mode)
 	leafTag, err := vm.dstack.PopByteArray()
 	if err != nil {
 		return err
 	}
+
+	// Compute leaf hash
+	var current []byte
 	if len(leafTag) == 0 {
-		return scriptError(txscript.ErrInvalidStackOperation,
-			"leaf_tag must not be empty")
+		// Raw hash mode: leaf_data must be exactly 32 bytes
+		if len(leafData) != 32 {
+			return scriptError(txscript.ErrInvalidStackOperation,
+				"raw hash mode requires leaf_data to be 32 bytes")
+		}
+		current = leafData
+	} else {
+		h := chainhash.TaggedHash(leafTag, leafData)
+		current = h[:]
 	}
 
-	// Compute leaf hash: tagged_hash(leaf_tag, leaf_data)
-	currentHash := chainhash.TaggedHash(leafTag, leafData)
-	current := currentHash[:]
-
-	// Walk the proof path
+	// Walk the proof path with lexicographic ordering
 	for i := 0; i < len(proof); i += 32 {
 		sibling := proof[i : i+32]
 		combined := make([]byte, 64)
 		if bytes.Compare(current, sibling) < 0 {
-			// current < sibling: hash(current || sibling)
 			copy(combined[:32], current)
 			copy(combined[32:], sibling)
 		} else {
-			// current >= sibling: hash(sibling || current)
 			copy(combined[:32], sibling)
 			copy(combined[32:], current)
 		}
-		branchHash := chainhash.TaggedHash(branchTag, combined)
-		current = branchHash[:]
+		h := chainhash.TaggedHash(branchTag, combined)
+		current = h[:]
 	}
 
-	// Verify
-	if !bytes.Equal(current, expectedRoot) {
-		return scriptError(txscript.ErrEqualVerify,
-			"merkle path verification failed")
-	}
-
+	// Push computed root
+	vm.dstack.PushByteArray(current)
 	return nil
 }
 

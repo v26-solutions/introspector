@@ -57,6 +57,7 @@ func TestOpcodeDisasm(t *testing.T) {
 		0xfa: "OP_SMALLINTEGER", 0xfb: "OP_PUBKEYS",
 		0xfd: "OP_PUBKEYHASH", 0xfe: "OP_PUBKEY",
 		0xff: "OP_INVALIDOPCODE", 0xba: "OP_CHECKSIGADD",
+		0xb3: "OP_MERKLEBRANCHVERIFY",
 		// Add new defined opcodes
 		0xc4: "OP_SHA256INITIALIZE", 0xc5: "OP_SHA256UPDATE",
 		0xc6: "OP_SHA256FINALIZE", 0xc7: "OP_INSPECTINPUTOUTPOINT",
@@ -72,7 +73,6 @@ func TestOpcodeDisasm(t *testing.T) {
 		0xdf: "OP_GREATERTHANOREQUAL64", 0xe0: "OP_SCRIPTNUMTOLE64",
 		0xe1: "OP_LE64TOSCRIPTNUM", 0xe2: "OP_LE32TOLE64",
 		0xe3: "OP_ECMULSCALARVERIFY", 0xe4: "OP_TWEAKVERIFY",
-		0xf4: "OP_MERKLEPATHVERIFY",
 	}
 	for opcodeVal, expectedStr := range expectedStrings {
 		var data []byte
@@ -112,6 +112,9 @@ func TestOpcodeDisasm(t *testing.T) {
 			case 0xb2:
 				// OP_NOP3 is an alias of OP_CHECKSEQUENCEVERIFY
 				expectedStr = "OP_CHECKSEQUENCEVERIFY"
+			case 0xb3:
+				// OP_NOP4 is now OP_MERKLEBRANCHVERIFY
+				expectedStr = "OP_MERKLEBRANCHVERIFY"
 			default:
 				val := byte(opcodeVal - (0xb0 - 1))
 				expectedStr = "OP_NOP" + strconv.Itoa(int(val))
@@ -126,7 +129,7 @@ func TestOpcodeDisasm(t *testing.T) {
 			(opcodeVal == 0xc8) || // Unknown between input inspection ops
 			(opcodeVal == 0xce) || // Unknown between input and output ops
 			(opcodeVal == 0xd0) || // Unknown between output ops
-			(opcodeVal >= 0xf3 && opcodeVal <= 0xf9 && opcodeVal != 0xf4) || // Unknown range after new ops
+			(opcodeVal >= 0xf3 && opcodeVal <= 0xf9) || // Unknown range after new ops
 			opcodeVal == 0xfc:
 			expectedStr = "OP_UNKNOWN" + strconv.Itoa(opcodeVal)
 		}
@@ -188,6 +191,9 @@ func TestOpcodeDisasm(t *testing.T) {
 			case 0xb2:
 				// OP_NOP3 is an alias of OP_CHECKSEQUENCEVERIFY
 				expectedStr = "OP_CHECKSEQUENCEVERIFY"
+			case 0xb3:
+				// OP_NOP4 is now OP_MERKLEBRANCHVERIFY
+				expectedStr = "OP_MERKLEBRANCHVERIFY"
 			default:
 				val := byte(opcodeVal - (0xb0 - 1))
 				expectedStr = "OP_NOP" + strconv.Itoa(int(val))
@@ -202,7 +208,7 @@ func TestOpcodeDisasm(t *testing.T) {
 			(opcodeVal == 0xc8) || // Unknown between input inspection ops
 			(opcodeVal == 0xce) || // Unknown between input and output ops
 			(opcodeVal == 0xd0) || // Unknown between output ops
-			(opcodeVal >= 0xf3 && opcodeVal <= 0xf9 && opcodeVal != 0xf4) || // Unknown range after new ops
+			(opcodeVal >= 0xf3 && opcodeVal <= 0xf9) || // Unknown range after new ops
 			opcodeVal == 0xfc:
 			expectedStr = "OP_UNKNOWN" + strconv.Itoa(opcodeVal)
 		}
