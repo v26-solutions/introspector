@@ -44,19 +44,19 @@ func (s *service) SubmitTx(ctx context.Context, tx OffchainTx) (*OffchainTx, err
 
 	for _, entry := range packet.Entries {
 		inputIndex := int(entry.Vin)
-		script, err := readArkadeScript(arkPtx, inputIndex, signerPublicKey, entry)
+		script, err := arkade.ReadArkadeScript(arkPtx, inputIndex, signerPublicKey, entry)
 		if err != nil {
 			// skip if the input is not a valid arkade script
 			continue
 		}
 
-		log.Debugf("executing arkade script: %x", script.script)
-		if err := script.execute(arkPtx.UnsignedTx, prevoutFetcher, inputIndex); err != nil {
+		log.Debugf("executing arkade script: %x", script.Script())
+		if err := script.Execute(arkPtx.UnsignedTx, prevoutFetcher, inputIndex); err != nil {
 			return nil, fmt.Errorf("failed to execute arkade script: %w", err)
 		}
-		log.Debugf("execution of %x succeeded", script.script)
+		log.Debugf("execution of %x succeeded", script.Script())
 
-		if err := s.signer.signInput(arkPtx, inputIndex, script.hash, prevoutFetcher); err != nil {
+		if err := s.signer.signInput(arkPtx, inputIndex, script.Hash(), prevoutFetcher); err != nil {
 			return nil, fmt.Errorf("failed to sign input %d: %w", inputIndex, err)
 		}
 
@@ -72,7 +72,7 @@ func (s *service) SubmitTx(ctx context.Context, tx OffchainTx) (*OffchainTx, err
 			return nil, fmt.Errorf("failed to create prevout fetcher for checkpoint: %w", err)
 		}
 
-		if err := s.signer.signInput(checkpointPtx, 0, script.hash, checkpointPrevoutFetcher); err != nil {
+		if err := s.signer.signInput(checkpointPtx, 0, script.Hash(), checkpointPrevoutFetcher); err != nil {
 			return nil, fmt.Errorf("failed to sign checkpoint input %d: %w", inputIndex, err)
 		}
 	}
