@@ -1,10 +1,9 @@
-package application
+package arkade
 
 import (
 	"bytes"
 	"fmt"
 
-	"github.com/ArkLabsHQ/introspector/pkg/arkade"
 	"github.com/arkade-os/arkd/pkg/ark-lib/extension"
 	scriptlib "github.com/arkade-os/arkd/pkg/ark-lib/script"
 	"github.com/arkade-os/arkd/pkg/ark-lib/txutils"
@@ -15,7 +14,7 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-type arkadeScript struct {
+type ArkadeScript struct {
 	script  []byte
 	hash    []byte
 	witness wire.TxWitness
@@ -23,10 +22,17 @@ type arkadeScript struct {
 	tapLeaf txscript.TapLeaf
 }
 
-// readArkadeScript reads an arkade script from an IntrospectorEntry and validates
-// it against the tapscript in the PSBT input. The entry contains the script and
-// witness data extracted from the Introspector Packet (OP_RETURN TLV).
-func readArkadeScript(ptx *psbt.Packet, inputIndex int, signerPublicKey *btcec.PublicKey, entry arkade.IntrospectorEntry) (*arkadeScript, error) {
+type ExecuteOption func(*Engine)
+
+func WithDebugCallback(callback func(*StepInfo, *Engine) error) ExecuteOption {
+	return func(engine *Engine) {
+		engine.stepCallback = func(step *StepInfo) error {
+			return callback(step, engine)
+		}
+	}
+}
+
+func ReadArkadeScript(ptx *psbt.Packet, inputIndex int, signerPublicKey *btcec.PublicKey, entry IntrospectorEntry) (*ArkadeScript, error) {
 	if len(ptx.Inputs) <= inputIndex {
 		return nil, fmt.Errorf("input index out of range")
 	}
@@ -41,11 +47,10 @@ func readArkadeScript(ptx *psbt.Packet, inputIndex int, signerPublicKey *btcec.P
 		return nil, fmt.Errorf("input does not specify any TaprootLeafScript")
 	}
 
-	scriptHash := arkade.ArkadeScriptHash(entry.Script)
-	expectedPublicKey := arkade.ComputeArkadeScriptPublicKey(signerPublicKey, scriptHash)
+	scriptHash := ArkadeScriptHash(entry.Script)
+	expectedPublicKey := ComputeArkadeScriptPublicKey(signerPublicKey, scriptHash)
 	expectedPublicKeyXonly := schnorr.SerializePubKey(expectedPublicKey)
 
-	// TODO: allow any type of closure (condition, cltv ...)
 	var tapscript scriptlib.MultisigClosure
 	valid, err := tapscript.Decode(spendingTapscript.Script)
 	if err != nil {
@@ -56,7 +61,6 @@ func readArkadeScript(ptx *psbt.Packet, inputIndex int, signerPublicKey *btcec.P
 	}
 
 	found := false
-
 	for _, pubkey := range tapscript.PubKeys {
 		xonly := schnorr.SerializePubKey(pubkey)
 		if bytes.Equal(xonly, expectedPublicKeyXonly) {
@@ -78,7 +82,7 @@ func readArkadeScript(ptx *psbt.Packet, inputIndex int, signerPublicKey *btcec.P
 		arkadeScriptWitness = witness
 	}
 
-	return &arkadeScript{
+	return &ArkadeScript{
 		script:  entry.Script,
 		hash:    scriptHash,
 		witness: arkadeScriptWitness,
@@ -87,14 +91,14 @@ func readArkadeScript(ptx *psbt.Packet, inputIndex int, signerPublicKey *btcec.P
 	}, nil
 }
 
-func (s arkadeScript) execute(spendingTx *wire.MsgTx, prevoutFetcher txscript.PrevOutputFetcher, inputIndex int) error {
+func (s *ArkadeScript) Execute(spendingTx *wire.MsgTx, prevoutFetcher txscript.PrevOutputFetcher, inputIndex int, opts ...ExecuteOption) error {
 	prevOut := prevoutFetcher.FetchPrevOutput(spendingTx.TxIn[inputIndex].PreviousOutPoint)
 	inputAmount := int64(0)
 	if prevOut != nil {
 		inputAmount = prevOut.Value
 	}
 
-	engine, err := arkade.NewEngine(
+	engine, err := NewEngine(
 		s.script,
 		spendingTx,
 		inputIndex,
@@ -107,14 +111,16 @@ func (s arkadeScript) execute(spendingTx *wire.MsgTx, prevoutFetcher txscript.Pr
 		return fmt.Errorf("failed to create engine: %w", err)
 	}
 
-	// Parse asset packet from transaction extension if present
+	for _, opt := range opts {
+		opt(engine)
+	}
+
 	ext, err := extension.NewExtensionFromTx(spendingTx)
 	if err == nil {
 		if ap := ext.GetAssetPacket(); ap != nil {
 			engine.SetAssetPacket(ap)
 		}
 	}
-	// If error, extension is not present - this is okay, just don't set it
 
 	if len(s.witness) > 0 {
 		engine.SetStack(s.witness)
@@ -125,4 +131,20 @@ func (s arkadeScript) execute(spendingTx *wire.MsgTx, prevoutFetcher txscript.Pr
 	}
 
 	return nil
+}
+
+func (s *ArkadeScript) Hash() []byte {
+	return append([]byte(nil), s.hash...)
+}
+
+func (s *ArkadeScript) PubKey() *btcec.PublicKey {
+	return s.pubkey
+}
+
+func (s *ArkadeScript) TapLeaf() txscript.TapLeaf {
+	return s.tapLeaf
+}
+
+func (s *ArkadeScript) Script() []byte {
+	return append([]byte(nil), s.script...)
 }
