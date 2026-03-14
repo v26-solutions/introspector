@@ -1042,6 +1042,269 @@ func TestIntrospectorRejectsInvalidArkadeScript(t *testing.T) {
 	}
 }
 
+func TestIntrospectorAcceptsMixedIntrospectorEntries(t *testing.T) {
+	ctx := context.Background()
+	alice, grpcAlice := setupArkSDK(t)
+	t.Cleanup(func() {
+		grpcAlice.Close()
+	})
+
+	const (
+		sendAmountA = 10000
+		sendAmountB = 10000
+	)
+
+	bobWallet, _, bobPubKey := setupBobWallet(t, ctx)
+	aliceAddr := fundAndSettleAlice(t, ctx, alice, sendAmountA+sendAmountB)
+
+	alicePkScript, err := script.P2TRScript(aliceAddr.VtxoTapKey)
+	require.NoError(t, err)
+
+	arkadeScriptA, err := txscript.NewScriptBuilder().
+		AddOp(arkade.OP_ADD64).AddOp(arkade.OP_VERIFY).
+		AddData(uint64LE(10)).
+		AddOp(arkade.OP_EQUAL).
+		Script()
+	require.NoError(t, err)
+
+	arkadeScriptB, err := txscript.NewScriptBuilder().
+		AddOp(arkade.OP_ADD64).AddOp(arkade.OP_VERIFY).
+		AddData(uint64LE(12)).
+		AddOp(arkade.OP_EQUAL).
+		Script()
+	require.NoError(t, err)
+
+	introspectorClient, introspectorPublicKey, conn := setupIntrospectorClient(t, ctx)
+	t.Cleanup(func() {
+		//nolint:errcheck
+		conn.Close()
+	})
+
+	otherIntrospectorPrivateKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+	otherIntrospectorPublicKey := otherIntrospectorPrivateKey.PubKey()
+
+	vtxoScriptA := createVtxoScriptWithArkadeScript(
+		bobPubKey,
+		aliceAddr.Signer,
+		introspectorPublicKey,
+		arkade.ArkadeScriptHash(arkadeScriptA),
+	)
+	vtxoScriptB := createVtxoScriptWithArkadeScript(
+		bobPubKey,
+		aliceAddr.Signer,
+		otherIntrospectorPublicKey,
+		arkade.ArkadeScriptHash(arkadeScriptB),
+	)
+
+	vtxoTapKeyA, vtxoTapTreeA, err := vtxoScriptA.TapTree()
+	require.NoError(t, err)
+	vtxoTapKeyB, vtxoTapTreeB, err := vtxoScriptB.TapTree()
+	require.NoError(t, err)
+
+	closureA := vtxoScriptA.ForfeitClosures()[0]
+	closureB := vtxoScriptB.ForfeitClosures()[0]
+
+	arkadeTapscriptA, err := closureA.Script()
+	require.NoError(t, err)
+	arkadeTapscriptB, err := closureB.Script()
+	require.NoError(t, err)
+
+	merkleProofA, err := vtxoTapTreeA.GetTaprootMerkleProof(
+		txscript.NewBaseTapLeaf(arkadeTapscriptA).TapHash(),
+	)
+	require.NoError(t, err)
+	merkleProofB, err := vtxoTapTreeB.GetTaprootMerkleProof(
+		txscript.NewBaseTapLeaf(arkadeTapscriptB).TapHash(),
+	)
+	require.NoError(t, err)
+
+	ctrlBlockA, err := txscript.ParseControlBlock(merkleProofA.ControlBlock)
+	require.NoError(t, err)
+	ctrlBlockB, err := txscript.ParseControlBlock(merkleProofB.ControlBlock)
+	require.NoError(t, err)
+
+	tapscriptA := &waddrmgr.Tapscript{
+		ControlBlock:   ctrlBlockA,
+		RevealedScript: merkleProofA.Script,
+	}
+	tapscriptB := &waddrmgr.Tapscript{
+		ControlBlock:   ctrlBlockB,
+		RevealedScript: merkleProofB.Script,
+	}
+
+	bobAddrA := arklib.Address{
+		HRP:        "tark",
+		VtxoTapKey: vtxoTapKeyA,
+		Signer:     aliceAddr.Signer,
+	}
+	bobAddrB := arklib.Address{
+		HRP:        "tark",
+		VtxoTapKey: vtxoTapKeyB,
+		Signer:     aliceAddr.Signer,
+	}
+
+	bobAddrAStr, err := bobAddrA.EncodeV0()
+	require.NoError(t, err)
+	bobAddrBStr, err := bobAddrB.EncodeV0()
+	require.NoError(t, err)
+
+	txid, err := alice.SendOffChain(
+		ctx,
+		[]types.Receiver{
+			{To: bobAddrAStr, Amount: sendAmountA},
+			{To: bobAddrBStr, Amount: sendAmountB},
+		},
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, txid)
+
+	indexerSvc := setupIndexer(t)
+
+	fundingTx, err := indexerSvc.GetVirtualTxs(ctx, []string{txid})
+	require.NoError(t, err)
+	require.NotEmpty(t, fundingTx)
+	require.Len(t, fundingTx.Txs, 1)
+
+	redeemPtx, err := psbt.NewFromRawBytes(strings.NewReader(fundingTx.Txs[0]), true)
+	require.NoError(t, err)
+
+	var bobOutputA *wire.TxOut
+	var bobOutputB *wire.TxOut
+	var bobOutputIndexA uint32
+	var bobOutputIndexB uint32
+
+	for i, out := range redeemPtx.UnsignedTx.TxOut {
+		switch {
+		case bytes.Equal(out.PkScript[2:], schnorr.SerializePubKey(bobAddrA.VtxoTapKey)):
+			bobOutputA = out
+			bobOutputIndexA = uint32(i)
+		case bytes.Equal(out.PkScript[2:], schnorr.SerializePubKey(bobAddrB.VtxoTapKey)):
+			bobOutputB = out
+			bobOutputIndexB = uint32(i)
+		}
+	}
+	require.NotNil(t, bobOutputA)
+	require.NotNil(t, bobOutputB)
+
+	infos, err := grpcAlice.GetInfo(ctx)
+	require.NoError(t, err)
+
+	checkpointScriptBytes, err := hex.DecodeString(infos.CheckpointTapscript)
+	require.NoError(t, err)
+
+	validTx, validCheckpoints, err := offchain.BuildTxs(
+		[]offchain.VtxoInput{
+			{
+				Outpoint: &wire.OutPoint{
+					Hash:  redeemPtx.UnsignedTx.TxHash(),
+					Index: bobOutputIndexA,
+				},
+				Tapscript:          tapscriptA,
+				Amount:             bobOutputA.Value,
+				RevealedTapscripts: []string{hex.EncodeToString(arkadeTapscriptA)},
+			},
+			{
+				Outpoint: &wire.OutPoint{
+					Hash:  redeemPtx.UnsignedTx.TxHash(),
+					Index: bobOutputIndexB,
+				},
+				Tapscript:          tapscriptB,
+				Amount:             bobOutputB.Value,
+				RevealedTapscripts: []string{hex.EncodeToString(arkadeTapscriptB)},
+			},
+		},
+		[]*wire.TxOut{
+			{
+				Value:    bobOutputA.Value + bobOutputB.Value,
+				PkScript: alicePkScript,
+			},
+		},
+		checkpointScriptBytes,
+	)
+	require.NoError(t, err)
+
+	addIntrospectorPacket(t, validTx, []arkade.IntrospectorEntry{
+		{Vin: 0, Script: arkadeScriptA, Witness: wire.TxWitness{uint64LE(6), uint64LE(4)}},
+		{Vin: 1, Script: arkadeScriptB, Witness: wire.TxWitness{uint64LE(7), uint64LE(5)}},
+	})
+
+	packet, err := arkade.FindIntrospectorPacket(validTx.UnsignedTx)
+	require.NoError(t, err)
+	require.Len(t, packet, 2)
+	require.Equal(t, uint16(0), packet[0].Vin)
+	require.Equal(t, uint16(1), packet[1].Vin)
+
+	explorer, err := mempoolexplorer.NewExplorer("http://localhost:3000", arklib.BitcoinRegTest)
+	require.NoError(t, err)
+
+	encodedValidTx, err := validTx.B64Encode()
+	require.NoError(t, err)
+
+	signedTxBeforeSubmit, err := bobWallet.SignTransaction(ctx, explorer, encodedValidTx)
+	require.NoError(t, err)
+
+	beforePtx, err := psbt.NewFromRawBytes(strings.NewReader(signedTxBeforeSubmit), true)
+	require.NoError(t, err)
+	require.Len(t, beforePtx.Inputs, 2)
+
+	encodedValidCheckpoints := make([]string, 0, len(validCheckpoints))
+	for _, checkpoint := range validCheckpoints {
+		encoded, err := checkpoint.B64Encode()
+		require.NoError(t, err)
+		encodedValidCheckpoints = append(encodedValidCheckpoints, encoded)
+	}
+	require.Len(t, encodedValidCheckpoints, 2)
+
+	beforeCheckpointA, err := psbt.NewFromRawBytes(strings.NewReader(encodedValidCheckpoints[0]), true)
+	require.NoError(t, err)
+	beforeCheckpointB, err := psbt.NewFromRawBytes(strings.NewReader(encodedValidCheckpoints[1]), true)
+	require.NoError(t, err)
+
+	signedTxAfterSubmit, signedByIntrospectorCheckpoints, err := introspectorClient.SubmitTx(
+		ctx,
+		signedTxBeforeSubmit,
+		encodedValidCheckpoints,
+	)
+	require.NoError(t, err)
+	require.Len(t, signedByIntrospectorCheckpoints, 2)
+
+	afterPtx, err := psbt.NewFromRawBytes(strings.NewReader(signedTxAfterSubmit), true)
+	require.NoError(t, err)
+	require.Len(t, afterPtx.Inputs, 2)
+
+	require.Greater(
+		t,
+		len(afterPtx.Inputs[0].TaprootScriptSpendSig),
+		len(beforePtx.Inputs[0].TaprootScriptSpendSig),
+		"expected introspector to sign vin 0",
+	)
+	require.Equal(
+		t,
+		len(beforePtx.Inputs[1].TaprootScriptSpendSig),
+		len(afterPtx.Inputs[1].TaprootScriptSpendSig),
+		"expected introspector to ignore vin 1 bound to other introspector",
+	)
+
+	afterCheckpointA, err := psbt.NewFromRawBytes(strings.NewReader(signedByIntrospectorCheckpoints[0]), true)
+	require.NoError(t, err)
+	afterCheckpointB, err := psbt.NewFromRawBytes(strings.NewReader(signedByIntrospectorCheckpoints[1]), true)
+	require.NoError(t, err)
+
+	require.Greater(
+		t,
+		len(afterCheckpointA.Inputs[0].TaprootScriptSpendSig),
+		len(beforeCheckpointA.Inputs[0].TaprootScriptSpendSig),
+		"expected introspector to sign checkpoint for vin 0",
+	)
+	require.Equal(
+		t,
+		len(beforeCheckpointB.Inputs[0].TaprootScriptSpendSig),
+		len(afterCheckpointB.Inputs[0].TaprootScriptSpendSig),
+		"expected introspector to ignore checkpoint for vin 1",
+	)
+}
+
 const password = "password"
 
 func setupIndexer(t *testing.T) indexer.Indexer {
